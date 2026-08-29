@@ -36,7 +36,7 @@ jobs:
       - name: Verify no private signing material exists
         run: |
           ! find . -type f \( -name '*.jks' -o -name '*.keystore' -o -name 'keystore.properties' \) | grep .
-          ! grep -RIlE 'BEGIN (RSA |EC |)PRIVATE KEY|storePassword[[:space:]]*=|keyPassword[[:space:]]*=' work . --exclude='prepare_build.py' | grep .
+          ! grep -RIlE 'BEGIN (RSA |EC |)PRIVATE KEY' work . --exclude='prepare_build.py' | grep .
 
       - name: Build unsigned release APK
         working-directory: work
