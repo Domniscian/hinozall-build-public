@@ -73,6 +73,18 @@ jobs:
           ! find . -type f \( -name '*.jks' -o -name '*.keystore' -o -name 'keystore.properties' \) | grep .
           ! grep -RIlE 'BEGIN (RSA |EC |)PRIVATE KEY' work . --exclude='prepare_build.py' | grep .
 
+      - name: Keep full code in final APK
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("work/app/build.gradle.kts")
+          s = p.read_text(encoding="utf-8")
+          s = s.replace("isMinifyEnabled = true", "isMinifyEnabled = false")
+          s = s.replace("isShrinkResources = true", "isShrinkResources = false")
+          p.write_text(s, encoding="utf-8")
+          PY
+          grep -nE 'versionCode|versionName|isMinifyEnabled|isShrinkResources' work/app/build.gradle.kts
+
       - name: Run unit tests
         working-directory: work
         run: ./gradlew --no-daemon :app:testReleaseUnitTest
