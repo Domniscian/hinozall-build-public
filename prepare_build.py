@@ -13,7 +13,7 @@ if "private fun ActivityDayClock(" not in text:
     )
     text = text.replace(
         "import androidx.compose.ui.graphics.Color\n",
-        "import androidx.compose.ui.graphics.Color\nimport androidx.compose.ui.graphics.StrokeCap\nimport androidx.compose.ui.graphics.drawscope.Stroke\nimport androidx.compose.ui.graphics.toArgb\n",
+        "import androidx.compose.ui.graphics.Color\nimport androidx.compose.ui.graphics.StrokeCap\nimport androidx.compose.ui.graphics.drawscope.Stroke\nimport androidx.compose.ui.graphics.nativeCanvas\nimport androidx.compose.ui.graphics.toArgb\n",
         1,
     )
     text = text.replace(
