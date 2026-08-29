@@ -37,6 +37,16 @@ jobs:
         run: |
           echo "bbbc00e7976db8b60dc2b6bd1e7c83188861959435521adb8f0ca467eee7ef08  final_exact.patch" | sha256sum -c -
           (cd work && patch -p1 --batch < ../final_exact.patch)
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path("work/app/src/main/java/com/domniscian/app/ui/screens/HomeScreen.kt")
+          s=p.read_text(encoding="utf-8")
+          old="        }\n    }\n\n    SnackbarHost(\n"
+          new="        }\n    }\n    }\n\n    SnackbarHost(\n"
+          if old not in s:
+              raise SystemExit("HomeScreen closure marker not found")
+          p.write_text(s.replace(old,new,1),encoding="utf-8")
+          PY
 
       - name: Verify exact patched source
         run: |
@@ -45,7 +55,7 @@ jobs:
           echo "bc954c96beaf2445b443bc86ad72f11ab43b70b9472de658d1e1a62c8306c63e  app/src/main/java/com/domniscian/app/MainActivity.kt" | sha256sum -c -
           echo "2ada81827da1bd7e5fa3ceb798b0847d670b752a21eed7878d02a9cdcfc11db4  app/src/main/java/com/domniscian/app/MainViewModel.kt" | sha256sum -c -
           echo "d4b25255d0436809789ba822de798113485e5ca58fcdbb6aa922ace3290e7657  app/src/main/java/com/domniscian/app/background/PresenceMonitorService.kt" | sha256sum -c -
-          echo "abb4b7c869469eed80143e5a78f743e59c275951d4f72db8fc1966406d2018c3  app/src/main/java/com/domniscian/app/ui/screens/HomeScreen.kt" | sha256sum -c -
+          echo "8fb097eef9ed8461b4ededa08b43a8d11368a417d32a00ecbe0d633615eac5fc  app/src/main/java/com/domniscian/app/ui/screens/HomeScreen.kt" | sha256sum -c -
           echo "fb3a89a0572631aa63bb7f57db003049f99a12089b249c4cee8eb231fc1ce36c  app/src/main/java/com/domniscian/app/ui/screens/MessagesScreen.kt" | sha256sum -c -
           echo "ce2a9c6a4f05d89d858d5bbce22db3c4a181e3d7308eb2540bed1fbe2932ef05  app/src/main/java/com/domniscian/app/ui/screens/SettingsScreen.kt" | sha256sum -c -
           echo "2b9dc9147ce839238418266ce3fd80871e45f5ca9dce17d9e07d219b4d459719  app/src/main/java/com/domniscian/app/instagram/InstagramLoginActivity.kt" | sha256sum -c -
