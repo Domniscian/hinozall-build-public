@@ -19,12 +19,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat input/source.b64.part* | tr -d '\r\n' | base64 --decode > /tmp/domniscian-source.zip
+          cat input/source.b64.part* | tr -d '\r\n' | base64 --decode > /tmp/domniscian-source.tar.xz
           mkdir -p /tmp/domniscian-source
-          unzip -q /tmp/domniscian-source.zip -d /tmp/domniscian-source
+          tar -xJf /tmp/domniscian-source.tar.xz -C /tmp/domniscian-source
           test -f /tmp/domniscian-source/gradlew
           test ! -e /tmp/domniscian-source/keystore.properties
-          if find /tmp/domniscian-source -name '*.jks' -o -name '*.keystore' | grep -q .; then
+          if find /tmp/domniscian-source \( -name '*.jks' -o -name '*.keystore' \) -print -quit | grep -q .; then
             echo "Signing material must never be present in CI input." >&2
             exit 20
           fi
