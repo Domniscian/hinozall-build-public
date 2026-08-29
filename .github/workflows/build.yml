@@ -50,9 +50,16 @@ jobs:
           cp "$APK" Hinozall-Awoken-3.5.1-UNSIGNED.apk
           sha256sum Hinozall-Awoken-3.5.1-UNSIGNED.apk
 
-      - name: Upload unsigned APK
+      - name: Package exact patched source
+        run: |
+          (cd work && zip -qr ../Hinozall-Awoken-3.5.1-FINAL-SOURCE.zip . -x 'app/build/*' -x '.gradle/*' -x 'build/*' -x 'local.properties' -x '*.jks' -x '*.keystore' -x 'keystore.properties')
+          sha256sum Hinozall-Awoken-3.5.1-FINAL-SOURCE.zip
+
+      - name: Upload unsigned APK and exact source
         uses: actions/upload-artifact@v4
         with:
-          name: Hinozall-Awoken-3.5.1-unsigned
-          path: Hinozall-Awoken-3.5.1-UNSIGNED.apk
+          name: Hinozall-Awoken-3.5.1-build
+          path: |
+            Hinozall-Awoken-3.5.1-UNSIGNED.apk
+            Hinozall-Awoken-3.5.1-FINAL-SOURCE.zip
           if-no-files-found: error
