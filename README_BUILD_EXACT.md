@@ -1,0 +1,1 @@
+Isolated build transport. Do not use repository application sources. The workflow reconstructs only the payload derived from the user's current-conversation files.
