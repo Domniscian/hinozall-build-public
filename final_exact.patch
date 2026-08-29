@@ -997,7 +997,8 @@
                      drawArc(
                          color = primary,
                          startAngle = -90f + startFraction * 360f,
--                        sweepAngle = sweep,+                        sweepAngle = ((endFraction - startFraction) * 360f).coerceAtLeast(1.2f),
+-                        sweepAngle = sweep,
++                        sweepAngle = ((endFraction - startFraction) * 360f).coerceAtLeast(1.2f),
                          useCenter = false,
                          topLeft = arcTopLeft,
                          size = arcSize,
