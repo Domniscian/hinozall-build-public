@@ -1,0 +1,1514 @@
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -22,7 +22,7 @@
+         minSdk = 26
+         targetSdk = 36
+         versionCode = 11
+-        versionName = "3.5.1"
++        versionName = "3.5.0"
+ 
+         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+         vectorDrawables.useSupportLibrary = true
+--- a/app/src/main/java/com/domniscian/app/MainActivity.kt
++++ b/app/src/main/java/com/domniscian/app/MainActivity.kt
+@@ -24,6 +24,8 @@
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.interaction.MutableInteractionSource
++import androidx.compose.foundation.pager.HorizontalPager
++import androidx.compose.foundation.pager.rememberPagerState
+ import androidx.compose.foundation.layout.*
+ import androidx.compose.foundation.shape.CircleShape
+ import androidx.compose.foundation.shape.RoundedCornerShape
+@@ -83,8 +85,8 @@
+         Icon(
+             imageVector = if (selected) selectedIcon else unselectedIcon,
+             contentDescription = contentDescription,
+-            tint = Color.White,
+-            modifier = Modifier.size(if (selected) 32.dp else 30.dp),
++            tint = if (selected) Color.White else Color.White.copy(alpha = .62f),
++            modifier = Modifier.size(30.dp),
+         )
+     }
+ }
+@@ -186,8 +188,8 @@
+             .apply {
+                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                     setAutoEnterEnabled(autoEnter)
+-                    // This is a text/status surface, not video; non-seamless resizing avoids visual smearing.
+-                    setSeamlessResizeEnabled(false)
++                    // Keep the transition smooth when Android automatically enters PiP.
++                    setSeamlessResizeEnabled(true)
+                 }
+             }
+             .build()
+@@ -263,7 +265,11 @@
+     @Composable
+     private fun MainContent(snapshot: com.domniscian.app.model.AppSnapshot) {
+         val tabs = MainTab.entries
+-        var selectedNavigationIndex by rememberSaveable { mutableIntStateOf(0) }
++        val pagerState = rememberPagerState(initialPage = 0, pageCount = { tabs.size })
++        val navigationScope = rememberCoroutineScope()
++        val navigationPage by remember {
++            derivedStateOf { if (pagerState.isScrollInProgress) pagerState.targetPage else pagerState.currentPage }
++        }
+         var notificationAllowed by remember { mutableStateOf(canNotify()) }
+         var listenerEnabled by remember { mutableStateOf(isListenerEnabled()) }
+         var batteryUnrestricted by remember { mutableStateOf(isBatteryUnrestricted()) }
+@@ -297,7 +303,7 @@
+                 }
+             }
+         }
+-        DisposableEffect(selectedNavigationIndex, revision) {
++        DisposableEffect(navigationPage, revision) {
+             notificationAllowed = canNotify()
+             listenerEnabled = isListenerEnabled()
+             batteryUnrestricted = isBatteryUnrestricted()
+@@ -374,13 +380,13 @@
+                             val destinations = listOf(
+                                 Triple(Pair(Icons.Rounded.Home, Icons.Outlined.Home), "Activité", MainTab.ACTIVITY),
+                                 Triple(Pair(Icons.Rounded.Send, Icons.Outlined.Send), "Messages", MainTab.MESSAGES),
+-                                Triple(Pair(Icons.Rounded.QueryStats, Icons.Rounded.QueryStats), "Analyses", MainTab.ANALYTICS),
++                                Triple(Pair(Icons.Rounded.QueryStats, Icons.Outlined.QueryStats), "Analyses", MainTab.ANALYTICS),
+                                 Triple(Pair(Icons.Rounded.Tune, Icons.Outlined.Tune), "Réglages", MainTab.SETTINGS),
+                             )
+                             destinations.forEachIndexed { index, (icons, label, _) ->
+                                 ModernNavigationItem(
+-                                    selected = selectedNavigationIndex == index,
+-                                    onClick = { selectedNavigationIndex = index },
++                                    selected = navigationPage == index,
++                                    onClick = { navigationScope.launch { pagerState.animateScrollToPage(index) } },
+                                     selectedIcon = icons.first,
+                                     unselectedIcon = icons.second,
+                                     contentDescription = label,
+@@ -395,7 +401,12 @@
+                 Modifier.padding(padding).fillMaxSize(),
+                 color = MaterialTheme.colorScheme.background,
+             ) {
+-                when (tabs[selectedNavigationIndex]) {
++                HorizontalPager(
++                    state = pagerState,
++                    modifier = Modifier.fillMaxSize(),
++                    beyondViewportPageCount = 1,
++                ) { page ->
++                when (tabs[page]) {
+                     MainTab.ACTIVITY -> HomeScreen(
+                         snapshot,
+                         onSelect = viewModel::selectTarget,
+@@ -467,6 +478,7 @@
+                         },
+                     )
+                 }
++                }
+             }
+         }
+     }
+--- a/app/src/main/java/com/domniscian/app/MainViewModel.kt
++++ b/app/src/main/java/com/domniscian/app/MainViewModel.kt
+@@ -60,7 +60,7 @@
+                     app,
+                     Intent(app, PresenceMonitorService::class.java).setAction(PresenceMonitorService.ACTION_RECONFIGURE),
+                 )
+-            }.onFailure { message("DOM-514 — Impossible d’appliquer immédiatement le mode d’observation : ${it.message.orEmpty()}") }
++            }.onFailure { message("DOM-514 — Impossible d’appliquer immédiatement le moteur d’observation : ${it.message.orEmpty()}") }
+         }
+     }
+ 
+@@ -156,8 +156,9 @@
+                     error.message?.contains("Version de sauvegarde", ignoreCase = true) == true -> "version de sauvegarde non prise en charge"
+                     error.message?.contains("JSON", ignoreCase = true) == true -> "contenu de sauvegarde illisible"
+                     error.message?.contains("lire le fichier", ignoreCase = true) == true -> "fichier inaccessible"
+-                    else -> "fichier invalide ou incompatible"
++                    else -> error.message?.takeIf { it.isNotBlank() } ?: "fichier invalide ou incompatible"
+                 }
++                app.store.recordDiagnostic("DOM-525", "backup", "warning", detail)
+                 message("DOM-525 — Restauration impossible : $detail.")
+             }
+         }
+--- a/app/src/main/java/com/domniscian/app/background/PresenceMonitorService.kt
++++ b/app/src/main/java/com/domniscian/app/background/PresenceMonitorService.kt
+@@ -40,7 +40,7 @@
+     private var explicitlyStopped = false
+     private var lastDirectSyncAt = 0L
+     private var realtimeClient: InstagramRealtimePresenceClient? = null
+-    
++
+     override fun onCreate() {
+         super.onCreate()
+         app = application as DomniscianApplication
+@@ -55,12 +55,10 @@
+             ACTION_STOP -> stopMonitoring()
+             ACTION_REFRESH -> {
+                 startLoopIfNeeded()
+-                // Explicit user refresh remains a one-shot HTTP snapshot in either mode.
++                // Manual refresh is an explicit one-shot synchronization in either engine.
+                 scope.launch { pollOnce() }
+             }
+             ACTION_RECONFIGURE -> {
+-                // A settings-mode change must take effect immediately. Closing the socket
+-                // unblocks a realtime read and cancelling the job interrupts long polling delays.
+                 realtimeClient?.close()
+                 loopJob?.cancel()
+                 loopJob = null
+@@ -88,6 +86,7 @@
+         loopJob = scope.launch { runMonitoringLoop() }
+     }
+ 
++
+     private suspend fun runMonitoringLoop() {
+         while (scope.isActive) {
+             when (app.store.settings().observationMode) {
+@@ -100,18 +99,17 @@
+ 
+     private suspend fun runDomniscianPollingLoop() {
+         while (scope.isActive && app.store.settings().observationMode == ObservationMode.DOMNISCIAN) {
+-            val nextDelay = pollOnce()
++            val nextDelay = pollOnce(domniscianPolling = true)
+             delay(nextDelay.coerceAtLeast(1_000L))
+         }
+     }
+ 
+     /**
+-     * Hinozall Awoken V2: keep one realtime/MQTToT connection open and receive presence
+-     * transitions as server-pushed events. One HTTP fetch_and_subscribe_presence request
+-     * is used when a realtime session is (re)established to obtain the initial state and
+-     * register the requested target ids. While the realtime channel is healthy there is
+-     * no periodic HTTP presence polling. If the socket drops, we reconnect with backoff;
+-     * the next successful connection performs one fresh subscribe/snapshot.
++     * Hinozall Awoken: keep one realtime/MQTToT connection open and receive presence
++     * transitions as push events. One HTTP fetch_and_subscribe_presence request is used
++     * when the realtime session is established or re-established to obtain the initial
++     * state and subscribe the requested ids. There is no periodic HTTP presence polling
++     * while this mode is active. Keepalive and reconnection traffic still exist.
+      */
+     private suspend fun runRealtimeMonitoringLoop() {
+         var realtimeFailures = 0
+@@ -158,7 +156,7 @@
+                 }
+                 realtimeFailures = 0
+                 app.store.closeDiagnostic("DOM-530", "realtime")
+-                app.notifier.updateForeground(observable.size, "Hinozall Awoken V2 • temps réel")
++                app.notifier.updateForeground(observable.size, "Hinozall Awoken • temps réel")
+                 syncDirectIfDue(observable, settings, snapshot.receivedAt)
+ 
+                 client.readLoop(
+@@ -211,7 +209,7 @@
+         app.store.closeDiagnostic("DOM-530", "realtime")
+         app.notifier.updateForeground(
+             app.store.monitoringTargets().count { it.instagramUserId?.all(Char::isDigit) == true },
+-            "Temps réel • ${TimeText.clock(event.receivedAt)}",
++            "Hinozall Awoken • ${TimeText.clock(event.receivedAt)}",
+             interrupted = false,
+         )
+         syncDirectIfDue(app.store.monitoringTargets(), settings, event.receivedAt)
+@@ -224,7 +222,7 @@
+             "DOM-530",
+             "realtime",
+             if (interrupted) "warning" else "info",
+-            "${error.message} • reconnexion progressive Hinozall Awoken V2",
++            "${error.message} • reconnexion progressive Hinozall Awoken",
+         )
+         targets.forEach { target ->
+             val runtime = app.store.runtime(target.id)
+@@ -261,7 +259,7 @@
+         else -> 300_000L
+     }
+ 
+-    private suspend fun pollOnce(): Long = pollMutex.withLock {
++    private suspend fun pollOnce(domniscianPolling: Boolean = false): Long = pollMutex.withLock {
+         val settings = app.store.settings()
+         var targets = app.store.monitoringTargets()
+         if (targets.isEmpty()) {
+@@ -295,7 +293,7 @@
+                 interrupted = anyInterrupted,
+             )
+             val runtimes = observable.map { app.store.runtime(it.id) }
+-            return@withLock LowTrafficPollingPolicy.nextSuccessDelayMs(runtimes, settings.pollingIntervalMs, result.receivedAt)
++            return@withLock if (domniscianPolling) settings.pollingIntervalMs else LowTrafficPollingPolicy.nextSuccessDelayMs(runtimes, settings.pollingIntervalMs, result.receivedAt)
+         } catch (e: InstagramException) {
+             observable.forEach { processFailure(it, e) }
+             val maxFailures = observable.maxOfOrNull { app.store.runtime(it.id).consecutiveFailures } ?: 1
+--- a/app/src/main/java/com/domniscian/app/data/DomniscianStore.kt
++++ b/app/src/main/java/com/domniscian/app/data/DomniscianStore.kt
+@@ -786,9 +786,10 @@
+     }.toString()
+ 
+     private fun observationModeFromStored(raw: String?): ObservationMode = when (raw) {
+-        // Compatibility with the short-lived pre-V2 internal name.
+         "DOMINITION" -> ObservationMode.DOMNISCIAN
+-        else -> enumValueOrDefault(raw, ObservationMode.HINOZALL_AWOKEN)
++        "DOMNISCIAN" -> ObservationMode.DOMNISCIAN
++        "HINOZALL_AWOKEN" -> ObservationMode.HINOZALL_AWOKEN
++        else -> ObservationMode.HINOZALL_AWOKEN
+     }
+ 
+     private fun legacyPollingInterval(): Long = when (prefs.getString("polling_mode", null)) {
+--- a/app/src/main/java/com/domniscian/app/data/PortableBackup.kt
++++ b/app/src/main/java/com/domniscian/app/data/PortableBackup.kt
+@@ -155,8 +155,8 @@
+         },
+         primaryOwnAccountUsername = json.stringOrNull("primaryOwnAccountUsername")?.trim()?.removePrefix("@")?.lowercase(),
+         observationMode = when (json.optString("observationMode", "")) {
+-            "DOMINITION" -> ObservationMode.DOMNISCIAN
+-            else -> json.enum("observationMode", ObservationMode.HINOZALL_AWOKEN)
++            "DOMINITION", "DOMNISCIAN" -> ObservationMode.DOMNISCIAN
++            else -> ObservationMode.HINOZALL_AWOKEN
+         },
+         pollingIntervalMs = json.optLong("pollingIntervalMs", 5_000L).coerceIn(1_000L, 300_000L),
+         directSyncEnabled = false, // Sessions are deliberately never exported.
+--- a/app/src/main/java/com/domniscian/app/diagnostics/ErrorCatalog.kt
++++ b/app/src/main/java/com/domniscian/app/diagnostics/ErrorCatalog.kt
+@@ -35,10 +35,11 @@
+         ErrorDefinition("DOM-523", "Page Web Instagram refusée", "Instagram a répondu à la page intégrée avec une erreur HTTP qui n’est ni une limitation, ni une panne serveur, ni le cas 405 déjà classé.", "Appuie sur Réinitialiser une seule fois. Si Instagram continue de refuser les navigateurs intégrés, utilise la connexion directe."),
+         ErrorDefinition("DOM-524", "Sauvegarde impossible", "Android n’a pas pu créer ou écrire le fichier de sauvegarde chiffré.", "Choisis un emplacement disponible et vérifie l’espace libre, puis réessaie."),
+         ErrorDefinition("DOM-525", "Restauration impossible", "Le fichier ne correspond pas à une sauvegarde Domniscian compatible, est endommagé, ou son mot de passe est incorrect.", "Sélectionne le bon fichier et saisis exactement le mot de passe utilisé à l’export."),
+-        ErrorDefinition("DOM-526", "WebView noir ou vide", "La page principale a terminé son chargement mais aucun contenu interactif exploitable n’est visible. Le diagnostic conserve l’adresse et la version du fournisseur WebView.", "Mets Android System WebView et Chrome à jour, puis utilise Recharger. Si le code revient, relève le fournisseur WebView affiché."),
+-        ErrorDefinition("DOM-527", "Fournisseur WebView absent", "Android n’a pas fourni de moteur WebView utilisable à l’application.", "Active ou mets à jour Android System WebView ou Chrome dans le Play Store, puis redémarre l’application."),
+-        ErrorDefinition("DOM-528", "Navigation WebView bloquée", "La page Instagram a tenté d’ouvrir un domaine extérieur à la liste autorisée.", "N’autorise pas manuellement le domaine. Relève son nom si cette navigation est nécessaire à une étape de connexion légitime."),
+-        ErrorDefinition("DOM-530", "Temps réel Instagram indisponible", "La connexion realtime/MQTToT de présence s’est interrompue ou n’a pas pu être établie. Hinozall Awoken V2 ne lance aucun polling HTTP périodique pendant cette interruption : il tente de rétablir le canal temps réel avec un délai progressif, puis effectue une seule resynchronisation et un nouvel abonnement après reconnexion.", "Laisse la reconnexion automatique agir. Si Instagram demande une confirmation de sécurité, traite-la dans l’application officielle avant de relancer l’observation."),
++        ErrorDefinition("DOM-526", "WebView noir ou vide", "La page Instagram a terminé son chargement mais aucun contenu interactif exploitable n’est apparu. Le diagnostic conserve l’adresse chargée et la version du fournisseur WebView.", "Mets Android System WebView et Chrome à jour, appuie sur Recharger, puis relève le détail DOM-526 si le problème revient."),
++        ErrorDefinition("DOM-527", "Fournisseur WebView absent", "Android n’a fourni aucun moteur WebView utilisable à l’application.", "Active ou mets à jour Android System WebView ou Chrome, puis redémarre Hinozall Awoken."),
++        ErrorDefinition("DOM-528", "Navigation WebView bloquée", "La page Instagram a tenté d’ouvrir un domaine extérieur aux domaines Instagram/Facebook autorisés.", "Relève le domaine indiqué dans Diagnostic actuel si cette redirection fait partie d’une étape de connexion légitime."),
++        ErrorDefinition("DOM-529", "Erreur SSL WebView", "Android WebView a refusé le certificat ou la connexion TLS de la page intégrée. Hinozall Awoken ne contourne pas une erreur SSL.", "Vérifie la date du téléphone, le réseau et les mises à jour WebView/Chrome, puis réessaie."),
++        ErrorDefinition("DOM-530", "Temps réel Instagram indisponible", "La connexion realtime/MQTToT de présence s’est interrompue ou n’a pas pu être établie. Hinozall Awoken ne lance aucun polling HTTP périodique pendant cette interruption : il rétablit le canal avec un délai progressif puis effectue une seule resynchronisation après reconnexion.", "Laisse la reconnexion automatique agir. Si Instagram demande une confirmation de sécurité, traite-la dans l’application officielle avant de relancer l’observation."),
+         ErrorDefinition("DOM-599", "Erreur non classée", "Une exception imprévue a été interceptée avant de pouvoir être classée plus précisément.", "Ouvre Diagnostic actuel et conserve le texte exact de l’incident pour le prochain correctif."),
+         ErrorDefinition("HTTP-400", "Requête refusée", "Le serveur considère la requête comme invalide ou incomplète.", "Vérifie les champs saisis. Si l’erreur vient d’Instagram, mets Domniscian à jour."),
+         ErrorDefinition("HTTP-401", "Authentification requise", "La ressource demande une session valide ou Instagram ne reconnaît plus la session actuelle.", "Reconnecte le compte concerné dans Domniscian."),
+--- a/app/src/main/java/com/domniscian/app/instagram/InstagramLoginActivity.kt
++++ b/app/src/main/java/com/domniscian/app/instagram/InstagramLoginActivity.kt
+@@ -12,8 +12,8 @@
+ import android.webkit.WebSettings
+ import android.webkit.WebView
+ import android.webkit.WebViewClient
+-import android.webkit.SslErrorHandler
+ import android.webkit.RenderProcessGoneDetail
++import android.webkit.SslErrorHandler
+ import androidx.activity.ComponentActivity
+ import androidx.activity.compose.BackHandler
+ import androidx.activity.compose.setContent
+@@ -297,7 +297,6 @@
+     ) {
+         var webView by remember { mutableStateOf<WebView?>(null) }
+         var canGoBack by remember { mutableStateOf(false) }
+-        var lastBlankReportUrl by remember { mutableStateOf<String?>(null) }
+         BackHandler(enabled = canGoBack) { webView?.goBack() }
+         LaunchedEffect(webView) {
+             while (true) {
+@@ -316,11 +315,13 @@
+             }
+             AndroidView(
+                 factory = { context ->
+-                    val provider = WebView.getCurrentWebViewPackage()
+-                    if (provider == null) {
+-                        val diagnostic = WebLoginDiagnostics.forMissingProvider()
+-                        onError("${diagnostic.code} — ${diagnostic.message}")
+-                        app.store.recordDiagnostic(diagnostic.code, "login-web", "warning", diagnostic.message)
++                    val webViewProvider = runCatching { WebView.getCurrentWebViewPackage() }.getOrNull()
++                    if (webViewProvider == null) {
++                        val message = "DOM-527 — Aucun fournisseur WebView Android utilisable n’a été détecté."
++                        onError(message)
++                        app.store.recordDiagnostic("DOM-527", "login-web", "warning", message)
++                    } else {
++                        app.store.closeDiagnostic("DOM-527", "login-web")
+                     }
+                     WebView(context).apply {
+                         webView = this
+@@ -338,11 +339,6 @@
+                         settings.safeBrowsingEnabled = true
+                         settings.javaScriptCanOpenWindowsAutomatically = false
+                         settings.setSupportMultipleWindows(false)
+-                        settings.offscreenPreRaster = true
+-                        // Instagram's login page occasionally renders as a black surface on
+-                        // Samsung/Chromium GPU combinations. The login view does not need
+-                        // WebGL, so software compositing is a safe compatibility fallback.
+-                        setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+                         setBackgroundColor(android.graphics.Color.WHITE)
+                         CookieManager.getInstance().setAcceptCookie(true)
+                         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+@@ -355,7 +351,7 @@
+                             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                                 onLoading(true)
+                                 onError(null)
+-                                if (url != lastBlankReportUrl) lastBlankReportUrl = null
++                                app.store.closeDiagnostic("DOM-526", "login-web")
+                             }
+                             override fun onPageFinished(view: WebView?, url: String?) {
+                                 onLoading(false)
+@@ -363,21 +359,20 @@
+                                 CookieManager.getInstance().flush()
+                                 val cookies = collectInstagramCookies(view)
+                                 if (hasInstagramSession(cookies)) onConnected(cookies)
++                                val provider = runCatching { WebView.getCurrentWebViewPackage()?.versionName }.getOrNull().orEmpty()
+                                 view?.postDelayed({
+-                                    if (view.url != url || view.progress < 90 || lastBlankReportUrl == url) return@postDelayed
+                                     view.evaluateJavascript(
+-                                        """(function(){try{var b=document.body;if(!b)return 'blank';var t=(b.innerText||'').trim();var interactive=document.querySelectorAll('input,button,a,[role=button]').length;var rect=b.getBoundingClientRect();return (t.length<2 && interactive===0 && rect.height>0)?'blank':'ok';}catch(e){return 'inspect-error';}})()""",
++                                        "(function(){try{var b=document.body;var t=(b&&b.innerText||'').trim();var interactive=document.querySelectorAll('input,button,a').length;return document.readyState==='complete'&&interactive===0&&t.length<12;}catch(e){return false;}})()"
+                                     ) { result ->
+-                                        if (result?.contains("blank") == true) {
+-                                            val packageInfo = WebView.getCurrentWebViewPackage()
+-                                            val provider = packageInfo?.let { "${it.packageName} ${it.versionName}" } ?: "indisponible"
+-                                            val diagnostic = WebLoginDiagnostics.forBlankPage(provider, url)
+-                                            lastBlankReportUrl = url
+-                                            onError("${diagnostic.code} — ${diagnostic.message}")
+-                                            app.store.recordDiagnostic(diagnostic.code, "login-web", "warning", diagnostic.message)
++                                        if (result == "true") {
++                                            val detail = "Page Instagram chargée mais sans contenu interactif • ${url.orEmpty()} • WebView ${provider.ifBlank { "inconnu" }}"
++                                            onError("DOM-526 — Page Instagram noire ou vide. Ouvre Diagnostic actuel pour les détails.")
++                                            app.store.recordDiagnostic("DOM-526", "login-web", "warning", detail)
++                                        } else {
++                                            app.store.closeDiagnostic("DOM-526", "login-web")
+                                         }
+                                     }
+-                                }, 3_000L)
++                                }, 1_800L)
+                             }
+                             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                                 val uri = request?.url ?: return false
+@@ -386,9 +381,9 @@
+                                 val allowed = host == "instagram.com" || host.endsWith(".instagram.com") ||
+                                     host == "facebook.com" || host.endsWith(".facebook.com") || host.endsWith(".fb.com")
+                                 if (!allowed) {
+-                                    val diagnostic = WebLoginDiagnostics.forBlockedDomain(host)
+-                                    onError("${diagnostic.code} — ${diagnostic.message}")
+-                                    app.store.recordDiagnostic(diagnostic.code, "login-web", "warning", diagnostic.message)
++                                    val detail = "Navigation WebView bloquée vers ${uri.host.orEmpty()}"
++                                    onError("DOM-528 — Navigation WebView bloquée.")
++                                    app.store.recordDiagnostic("DOM-528", "login-web", "warning", detail)
+                                 }
+                                 return !allowed
+                             }
+@@ -400,13 +395,6 @@
+                                     app.store.recordDiagnostic(diagnostic.code, "login-web", "warning", diagnostic.message)
+                                 }
+                             }
+-                            override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
+-                                handler?.cancel()
+-                                onLoading(false)
+-                                val message = "DOM-503 — Connexion HTTPS WebView refusée (SSL ${error?.primaryError ?: -1})"
+-                                onError(message)
+-                                app.store.recordDiagnostic("DOM-503", "login-web", "warning", message)
+-                            }
+                             override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
+                                 if (request?.isForMainFrame != true) return
+                                 val code = errorResponse?.statusCode ?: return
+@@ -415,6 +403,13 @@
+                                 onError("${diagnostic.code} — ${diagnostic.message}")
+                                 app.store.recordDiagnostic(diagnostic.code, "login-web", "warning", diagnostic.message)
+                             }
++                            override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
++                                handler?.cancel()
++                                onLoading(false)
++                                val detail = "Erreur SSL WebView ${error?.primaryError ?: -1} sur ${error?.url.orEmpty()}"
++                                onError("DOM-529 — Connexion sécurisée WebView refusée.")
++                                app.store.recordDiagnostic("DOM-529", "login-web", "warning", detail)
++                            }
+                             override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                                 onLoading(false)
+                                 canGoBack = false
+--- a/app/src/main/java/com/domniscian/app/instagram/InstagramRealtimePresenceClient.kt
++++ b/app/src/main/java/com/domniscian/app/instagram/InstagramRealtimePresenceClient.kt
+@@ -30,7 +30,7 @@
+ ) : Exception(message, cause)
+ 
+ /**
+- * Hinozall Awoken V2 read-only Instagram Realtime/MQTToT client for app-presence events.
++ * Minimal, read-only Instagram Realtime/MQTToT client for app-presence events.
+  *
+  * It deliberately implements only the pieces required for presence:
+  * - cookie-auth MQTToT connect
+@@ -52,7 +52,6 @@
+         private const val IG_REALTIME_APP_ID = 567067343352427L
+         private const val PRESENCE_QUERY_ID = "17846944882223835"
+         private const val TOPIC_REALTIME_SUB = "149"
+-        private const val TOPIC_REALTIME_SUB_ROUTE = "/ig_realtime_sub"
+         private val SUBSCRIBE_TOPICS = listOf(88, 135, 149, 150, 133, 146)
+     }
+ 
+@@ -134,7 +133,7 @@
+             when (packet.type) {
+                 MqttotPacketType.PUBLISH -> {
+                     if (packet.qos == 1 && packet.packetId != null) send(MqttotCodec.pubAckPacket(packet.packetId))
+-                    if (packet.topic == TOPIC_REALTIME_SUB || packet.topic == TOPIC_REALTIME_SUB_ROUTE) {
++                    if (packet.topic == TOPIC_REALTIME_SUB) {
+                         val events = RealtimePresenceParser.parse(packet.payload, targetUserIds)
+                         for (event in events) onPresence(event)
+                     }
+--- a/app/src/main/java/com/domniscian/app/instagram/WebLoginDiagnostics.kt
++++ b/app/src/main/java/com/domniscian/app/instagram/WebLoginDiagnostics.kt
+@@ -15,15 +15,6 @@
+         else -> WebLoginDiagnostic("DOM-518", "Page Instagram interrompue : ${description.ifBlank { "erreur du moteur WebView" }}")
+     }
+ 
+-    fun forBlankPage(provider: String, url: String?): WebLoginDiagnostic =
+-        WebLoginDiagnostic("DOM-526", "Page Instagram noire ou vide après chargement • WebView $provider • ${url.orEmpty()}")
+-
+-    fun forMissingProvider(): WebLoginDiagnostic =
+-        WebLoginDiagnostic("DOM-527", "Aucun fournisseur Android System WebView exploitable n’est détecté")
+-
+-    fun forBlockedDomain(host: String): WebLoginDiagnostic =
+-        WebLoginDiagnostic("DOM-528", "Navigation WebView bloquée vers un domaine extérieur : $host")
+-
+     fun forHttp(status: Int): WebLoginDiagnostic = when {
+         status == 405 -> WebLoginDiagnostic("DOM-515", "Instagram refuse la connexion dans cette page intégrée (HTTP 405)")
+         status == 429 -> WebLoginDiagnostic("DOM-505", "Instagram limite temporairement le chargement de la page Web (HTTP 429)")
+--- a/app/src/main/java/com/domniscian/app/model/Models.kt
++++ b/app/src/main/java/com/domniscian/app/model/Models.kt
+@@ -149,6 +149,7 @@
+ 
+ enum class ThemeMode { SYSTEM, LIGHT, DARK }
+ enum class AccentColor { VIOLET, BLUE, TEAL, GREEN, ORANGE, ROSE, CUSTOM }
++
+ enum class ObservationMode { DOMNISCIAN, HINOZALL_AWOKEN }
+ 
+ data class AppSettings(
+@@ -164,9 +165,9 @@
+     val ownAccounts: List<OwnAccount> = emptyList(),
+     /** Username of the default sender account. */
+     val primaryOwnAccountUsername: String? = null,
+-    /** Presence transport selected by the user. */
++    /** Presence acquisition engine. Hinozall Awoken is realtime; Domniscian is polling. */
+     val observationMode: ObservationMode = ObservationMode.HINOZALL_AWOKEN,
+-    /** Exact interval requested by the user for legacy Domniscian polling. */
++    /** Exact interval used only by the Domniscian polling engine. */
+     val pollingIntervalMs: Long = 3_000L,
+     /** Optional, read-only Direct synchronization using a separately encrypted main session. */
+     val directSyncEnabled: Boolean = false,
+--- a/app/src/main/java/com/domniscian/app/ui/components/Components.kt
++++ b/app/src/main/java/com/domniscian/app/ui/components/Components.kt
+@@ -343,10 +343,6 @@
+     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+         Column(Modifier.weight(1f)) {
+             Text(title, style = MaterialTheme.typography.headlineMedium)
+-            subtitle?.takeIf(String::isNotBlank)?.let {
+-                Spacer(Modifier.height(2.dp))
+-                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+-            }
+         }
+         action?.invoke()
+     }
+@@ -357,10 +353,6 @@
+     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+         Column(Modifier.weight(1f)) {
+             Text(title, style = MaterialTheme.typography.titleLarge)
+-            subtitle?.takeIf(String::isNotBlank)?.let {
+-                Spacer(Modifier.height(2.dp))
+-                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+-            }
+         }
+         action?.invoke()
+     }
+--- a/app/src/main/java/com/domniscian/app/ui/screens/AnalyticsScreen.kt
++++ b/app/src/main/java/com/domniscian/app/ui/screens/AnalyticsScreen.kt
+@@ -19,6 +19,7 @@
+ import androidx.compose.material.icons.rounded.Schedule
+ import androidx.compose.material.icons.rounded.ZoomIn
+ import androidx.compose.material.icons.rounded.ZoomOut
++import androidx.compose.material.icons.rounded.RestartAlt
+ import androidx.compose.material3.*
+ import androidx.compose.runtime.*
+ import androidx.compose.runtime.saveable.rememberSaveable
+@@ -74,7 +75,7 @@
+         verticalArrangement = Arrangement.spacedBy(16.dp),
+     ) {
+         item {
+-            ScreenHeader("Analyses", target?.let { "@${it.username}" } ?: "Sélectionne une cible")
++            ScreenHeader("Analyses")
+         }
+         if (target == null) {
+             item { Panel(Modifier.fillMaxWidth()) { Text("Aucune cible sélectionnée", fontWeight = FontWeight.Bold) } }
+@@ -103,28 +104,28 @@
+             }
+             item {
+                 Panel(Modifier.fillMaxWidth()) {
+-                    SectionHeader("Tendance quotidienne", "Temps en ligne observé, jour par jour")
++                    SectionHeader("Tendance quotidienne")
+                     Spacer(Modifier.height(18.dp))
+                     DailyLineChart(summary)
+                 }
+             }
+             item {
+                 Panel(Modifier.fillMaxWidth()) {
+-                    SectionHeader("Blocs de 3 jours", "Comparaison glissante sur la période choisie")
++                    SectionHeader("Blocs de 3 jours")
+                     Spacer(Modifier.height(16.dp))
+                     BucketBars(summary.threeDayBuckets, MaterialTheme.colorScheme.primary)
+                 }
+             }
+             item {
+                 Panel(Modifier.fillMaxWidth()) {
+-                    SectionHeader("Analyse par semaine", "Semaines du lundi au dimanche")
++                    SectionHeader("Analyse par semaine")
+                     Spacer(Modifier.height(16.dp))
+                     BucketBars(summary.weeklyBuckets, MaterialTheme.colorScheme.secondary)
+                 }
+             }
+             item {
+                 Panel(Modifier.fillMaxWidth()) {
+-                    SectionHeader("Moyenne par jour de semaine", "Moyenne calculée sur la période choisie")
++                    SectionHeader("Moyenne par jour de semaine")
+                     Spacer(Modifier.height(18.dp))
+                     WeekdayBars(summary)
+                 }
+@@ -137,7 +138,7 @@
+                         Spacer(Modifier.width(10.dp))
+                         Column {
+                             Text("Répartition horaire", style = MaterialTheme.typography.titleLarge)
+-                            Text("${peak.twoDigits()}h → ${((peak + 1) % 24).twoDigits()}h", color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.SemiBold)
++                            Text("Pic observé : ${peak.twoDigits()}h → ${((peak + 1) % 24).twoDigits()}h", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                         }
+                     }
+                     Spacer(Modifier.height(16.dp))
+@@ -163,7 +164,7 @@
+             }
+             item {
+                 Panel(Modifier.fillMaxWidth()) {
+-                    SectionHeader("Messages et réponses", "Uniquement les preuves réellement capturées")
++                    SectionHeader("Messages et réponses")
+                     Spacer(Modifier.height(8.dp))
+                     StatRow("Messages suivis", summary.trackedMessages.toString())
+                     StatRow("Avec une période en ligne", summary.messagesWithOnlineWindow.toString())
+@@ -254,7 +255,7 @@
+     val fill = MaterialTheme.colorScheme.primary.copy(alpha = .10f)
+     val chartSurface = MaterialTheme.colorScheme.surface
+     var selectedIndex by remember(summary.daily) { mutableIntStateOf(values.lastIndex) }
+-    var zoom by rememberSaveable { mutableFloatStateOf(1f) }
++    var zoom by rememberSaveable(summary.daily.size) { mutableFloatStateOf(1f) }
+     val chartScroll = rememberScrollState()
+     val reveal = remember { Animatable(0f) }
+     LaunchedEffect(values) {
+@@ -263,66 +264,66 @@
+     }
+     Column {
+         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+-            Text("Zoom", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
++            Text("Zoom", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+             Spacer(Modifier.weight(1f))
+             IconButton(onClick = { zoom = (zoom - .5f).coerceAtLeast(1f) }, enabled = zoom > 1f) {
+                 Icon(Icons.Rounded.ZoomOut, "Dézoomer")
+             }
+-            Text("${zoom}×", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
++            Text("${(zoom * 100).roundToInt()} %", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+             IconButton(onClick = { zoom = (zoom + .5f).coerceAtMost(4f) }, enabled = zoom < 4f) {
+                 Icon(Icons.Rounded.ZoomIn, "Zoomer")
+             }
++            IconButton(onClick = { zoom = 1f }, enabled = zoom != 1f) {
++                Icon(Icons.Rounded.RestartAlt, "Réinitialiser le zoom")
++            }
+         }
+-        BoxWithConstraints(Modifier.fillMaxWidth()) {
+-            val chartWidth = maxWidth * zoom
+-            Column(Modifier.horizontalScroll(chartScroll)) {
+-                Canvas(
+-                    Modifier.width(chartWidth).height(180.dp).pointerInput(values, zoom) {
+-                        detectTapGestures { offset ->
+-                            if (values.isNotEmpty() && size.width > 0) {
+-                                selectedIndex = if (values.size == 1) 0 else
+-                                    ((offset.x / size.width) * values.lastIndex).roundToInt().coerceIn(0, values.lastIndex)
+-                            }
+-                        }
+-                    },
+-                ) {
+-                    val left = 4.dp.toPx()
+-                    val top = 8.dp.toPx()
+-                    val right = size.width - 4.dp.toPx()
+-                    val bottom = size.height - 8.dp.toPx()
+-                    repeat(4) { index ->
+-                        val y = top + (bottom - top) * index / 3f
+-                        drawLine(grid, Offset(left, y), Offset(right, y), 1.dp.toPx())
+-                    }
+-                    val step = if (values.size <= 1) 0f else (right - left) / (values.size - 1)
+-                    val points = values.mapIndexed { index, value ->
+-                        Offset(left + index * step, bottom - (bottom - top) * value / max.toFloat() * reveal.value)
+-                    }
+-                    if (points.isNotEmpty()) {
+-                        val area = Path().apply {
+-                            moveTo(points.first().x, bottom)
+-                            points.forEach { lineTo(it.x, it.y) }
+-                            lineTo(points.last().x, bottom)
+-                            close()
+-                        }
+-                        drawPath(area, fill)
+-                        val path = Path().apply { moveTo(points.first().x, points.first().y); points.drop(1).forEach { lineTo(it.x, it.y) } }
+-                        drawPath(path, line, style = Stroke(3.dp.toPx(), cap = StrokeCap.Round))
+-                        if (points.size <= 30 || zoom >= 2f) points.forEach { drawCircle(line, 3.dp.toPx(), it) }
+-                        points.getOrNull(selectedIndex)?.let { selected ->
+-                            drawLine(line.copy(alpha = .35f), Offset(selected.x, top), Offset(selected.x, bottom), 1.dp.toPx())
+-                            drawCircle(chartSurface, 7.dp.toPx(), selected)
+-                            drawCircle(line, 4.dp.toPx(), selected)
+-                        }
++        BoxWithConstraints(Modifier.fillMaxWidth().horizontalScroll(chartScroll)) {
++        Canvas(
++            Modifier.width(maxWidth * zoom).height(180.dp).pointerInput(values, zoom) {
++                detectTapGestures { offset ->
++                    if (values.isNotEmpty() && size.width > 0) {
++                        selectedIndex = if (values.size == 1) 0 else
++                            ((offset.x / size.width) * values.lastIndex).roundToInt().coerceIn(0, values.lastIndex)
+                     }
+                 }
+-                Row(Modifier.width(chartWidth), horizontalArrangement = Arrangement.SpaceBetween) {
+-                    Text(summary.daily.firstOrNull()?.date?.let { "${it.dayOfMonth}/${it.monthValue}" }.orEmpty(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+-                    Text(summary.daily.getOrNull(summary.daily.size / 2)?.date?.let { "${it.dayOfMonth}/${it.monthValue}" }.orEmpty(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+-                    Text(summary.daily.lastOrNull()?.date?.let { "${it.dayOfMonth}/${it.monthValue}" }.orEmpty(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
++            },
++        ) {
++            val left = 4.dp.toPx()
++            val top = 8.dp.toPx()
++            val right = size.width - 4.dp.toPx()
++            val bottom = size.height - 8.dp.toPx()
++            repeat(4) { index ->
++                val y = top + (bottom - top) * index / 3f
++                drawLine(grid, Offset(left, y), Offset(right, y), 1.dp.toPx())
++            }
++            val step = if (values.size <= 1) 0f else (right - left) / (values.size - 1)
++            val points = values.mapIndexed { index, value ->
++                Offset(left + index * step, bottom - (bottom - top) * value / max.toFloat() * reveal.value)
++            }
++            if (points.isNotEmpty()) {
++                val area = Path().apply {
++                    moveTo(points.first().x, bottom)
++                    points.forEach { lineTo(it.x, it.y) }
++                    lineTo(points.last().x, bottom)
++                    close()
++                }
++                drawPath(area, fill)
++                val path = Path().apply { moveTo(points.first().x, points.first().y); points.drop(1).forEach { lineTo(it.x, it.y) } }
++                drawPath(path, line, style = Stroke(3.dp.toPx(), cap = StrokeCap.Round))
++                if (points.size <= 30) points.forEach { drawCircle(line, 3.dp.toPx(), it) }
++                points.getOrNull(selectedIndex)?.let { selected ->
++                    drawLine(line.copy(alpha = .35f), Offset(selected.x, top), Offset(selected.x, bottom), 1.dp.toPx())
++                    drawCircle(chartSurface, 7.dp.toPx(), selected)
++                    drawCircle(line, 4.dp.toPx(), selected)
+                 }
+             }
+         }
++        }
++        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
++            Text(summary.daily.firstOrNull()?.date?.let { "${it.dayOfMonth}/${it.monthValue}" }.orEmpty(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
++            Text(summary.daily.getOrNull(summary.daily.size / 2)?.date?.let { "${it.dayOfMonth}/${it.monthValue}" }.orEmpty(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
++            Text(summary.daily.lastOrNull()?.date?.let { "${it.dayOfMonth}/${it.monthValue}" }.orEmpty(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
++        }
+         summary.daily.getOrNull(selectedIndex)?.let { selected ->
+             Spacer(Modifier.height(10.dp))
+             Surface(color = MaterialTheme.colorScheme.primary.copy(alpha = .10f), shape = RoundedCornerShape(12.dp)) {
+@@ -415,7 +416,7 @@
+         }
+         Surface(color = MaterialTheme.colorScheme.primary.copy(alpha = .10f), shape = RoundedCornerShape(11.dp)) {
+             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+-                Text("${selectedHour.twoDigits()}h–${((selectedHour + 1) % 24).twoDigits()}h", fontWeight = FontWeight.SemiBold)
++                Text("${selectedHour.twoDigits()}h → ${((selectedHour + 1) % 24).twoDigits()}h", fontWeight = FontWeight.SemiBold)
+                 Text(DisplayTime.duration(hours.getOrElse(selectedHour) { 0L }), color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.ExtraBold)
+             }
+         }
+--- a/app/src/main/java/com/domniscian/app/ui/screens/HomeScreen.kt
++++ b/app/src/main/java/com/domniscian/app/ui/screens/HomeScreen.kt
+@@ -84,6 +84,7 @@
+     var targetPicker by remember { mutableStateOf(false) }
+     var periodToDelete by remember { mutableStateOf<ActivityPeriod?>(null) }
+     var managePeriods by remember { mutableStateOf(false) }
++    var historyClockView by remember { mutableStateOf(false) }
+     var selectedPeriodIds by remember { mutableStateOf(emptySet<String>()) }
+     var confirmSelectedPeriodDelete by remember { mutableStateOf(false) }
+     var renameDialog by remember { mutableStateOf(false) }
+@@ -126,12 +127,16 @@
+     }
+ 
+     val refreshScope = rememberCoroutineScope()
++    val refreshSnackbar = remember { SnackbarHostState() }
+     var refreshing by remember { mutableStateOf(false) }
+     var refreshBaselineAttempt by remember { mutableStateOf<Long?>(null) }
+     fun triggerRefresh() {
+         if (refreshing) return
+         if (target == null) {
+-            onRefresh()
++            refreshScope.launch {
++                refreshSnackbar.currentSnackbarData?.dismiss()
++                refreshSnackbar.showSnackbar("Aucune cible sélectionnée à actualiser.")
++            }
+             return
+         }
+         refreshBaselineAttempt = runtime?.lastAttemptAt
+@@ -158,6 +163,7 @@
+         (if (refreshing) 62.dp else (72f * pullFraction).dp).toPx()
+     }
+ 
++    Box(Modifier.fillMaxSize()) {
+     PullToRefreshBox(
+         isRefreshing = refreshing,
+         onRefresh = { triggerRefresh() },
+@@ -354,83 +360,84 @@
+             }
+ 
+             item {
+-                ActivityDayClock(periods = periods)
+-            }
+-
+-            item {
+                 SectionHeader(
+                     "Historique d’activité",
+-                    if (managePeriods) "${selectedPeriodIds.size} sélectionnée(s)" else null,
+                     action = {
+-                        TextButton(onClick = {
+-                            val next = !managePeriods
+-                            managePeriods = next
+-                            if (!next) selectedPeriodIds = emptySet()
+-                        }) { Text(if (managePeriods) "Terminer" else "Gérer") }
++                        Row(verticalAlignment = Alignment.CenterVertically) {
++                            FilledTonalIconButton(
++                                onClick = {
++                                    historyClockView = !historyClockView
++                                    if (historyClockView) {
++                                        managePeriods = false
++                                        selectedPeriodIds = emptySet()
++                                    }
++                                },
++                                modifier = Modifier.size(40.dp),
++                            ) {
++                                Icon(
++                                    if (historyClockView) Icons.Rounded.ViewList else Icons.Rounded.Schedule,
++                                    if (historyClockView) "Afficher les sessions" else "Afficher l’horloge",
++                                    modifier = Modifier.size(21.dp),
++                                )
++                            }
++                            Spacer(Modifier.width(4.dp))
++                            if (managePeriods && selectedPeriodIds.isNotEmpty()) {
++                                IconButton(onClick = { confirmSelectedPeriodDelete = true }) {
++                                    Icon(Icons.Rounded.DeleteSweep, "Effacer la sélection", tint = MaterialTheme.colorScheme.error)
++                                }
++                            }
++                            TextButton(onClick = {
++                                val next = !managePeriods
++                                managePeriods = next
++                                if (next) historyClockView = false
++                                if (!next) selectedPeriodIds = emptySet()
++                            }) { Text(if (managePeriods) "Terminé" else "Gérer") }
++                        }
+                     },
+                 )
+             }
+ 
+-            if (managePeriods) item {
+-                Surface(
+-                    modifier = Modifier.fillMaxWidth(),
+-                    shape = RoundedCornerShape(16.dp),
+-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f),
+-                ) {
+-                    Row(
+-                        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+-                        verticalAlignment = Alignment.CenterVertically,
+-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+-                    ) {
+-                        TextButton(
+-                            onClick = { selectedPeriodIds = if (allSelectablePeriodsSelected) emptySet() else selectablePeriodIds },
+-                            enabled = selectablePeriodIds.isNotEmpty(),
+-                        ) { Text(if (allSelectablePeriodsSelected) "Tout désélectionner" else "Tout sélectionner") }
+-                        Spacer(Modifier.weight(1f))
+-                        Button(
+-                            onClick = { confirmSelectedPeriodDelete = true },
+-                            enabled = selectedPeriodIds.isNotEmpty(),
+-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+-                        ) {
+-                            Icon(Icons.Rounded.DeleteSweep, null)
+-                            Spacer(Modifier.width(5.dp))
+-                            Text("Effacer (${selectedPeriodIds.size})")
+-                        }
+-                    }
+-                }
+-            }
+-
+             if (periods.isEmpty()) item {
+                 Panel(Modifier.fillMaxWidth()) {
+                     Text("Aucune période enregistrée", fontWeight = FontWeight.Bold)
+                 }
+             }
+ 
+-            periods.groupBy(ActivityPeriod::day).toSortedMap(compareByDescending { it }).forEach { (day, dayPeriods) ->
+-                item(key = "day_$day") {
+-                    Row(verticalAlignment = Alignment.CenterVertically) {
+-                        Text(DisplayTime.day(day), fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
+-                        Spacer(Modifier.width(12.dp))
+-                        HorizontalDivider(Modifier.weight(1f), color = MaterialTheme.colorScheme.outline.copy(alpha = .28f))
+-                    }
++            if (periods.isNotEmpty() && historyClockView) {
++                item(key = "activity_day_clock") {
++                    ActivityDayClock(periods = periods)
+                 }
+-                itemsIndexed(dayPeriods, key = { index, period -> "period_${period.id}_$index" }) { _, period ->
+-                    PeriodCard(
+-                        period = period,
+-                        sent = pendingForTarget.filter { it.firstSessionId == period.id },
+-                        selectionMode = managePeriods,
+-                        selected = period.id in selectedPeriodIds,
+-                        onToggleSelection = {
+-                            if (period.endAt != null) {
+-                                selectedPeriodIds = if (period.id in selectedPeriodIds) selectedPeriodIds - period.id else selectedPeriodIds + period.id
+-                            }
+-                        },
+-                    )
++            } else {
++                periods.groupBy(ActivityPeriod::day).toSortedMap(compareByDescending { it }).forEach { (day, dayPeriods) ->
++                    item(key = "day_$day") {
++                        Row(verticalAlignment = Alignment.CenterVertically) {
++                            Text(DisplayTime.day(day), fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
++                            Spacer(Modifier.width(12.dp))
++                            HorizontalDivider(Modifier.weight(1f), color = MaterialTheme.colorScheme.outline.copy(alpha = .28f))
++                        }
++                    }
++                    itemsIndexed(dayPeriods, key = { index, period -> "period_${period.id}_$index" }) { _, period ->
++                        PeriodCard(
++                            period = period,
++                            sent = pendingForTarget.filter { it.firstSessionId == period.id },
++                            selectionMode = managePeriods,
++                            selected = period.id in selectedPeriodIds,
++                            onToggleSelection = {
++                                if (period.endAt != null) {
++                                    selectedPeriodIds = if (period.id in selectedPeriodIds) selectedPeriodIds - period.id else selectedPeriodIds + period.id
++                                }
++                            },
++                        )
++                    }
+                 }
+             }
+         }
+     }
+ 
++    SnackbarHost(
++        hostState = refreshSnackbar,
++        modifier = Modifier.align(Alignment.BottomCenter).padding(start = 18.dp, end = 18.dp, bottom = 18.dp),
++    )
+     }
+ 
+     if (addDialog) AddTargetSheet(
+@@ -587,24 +594,13 @@
+ 
+ @Composable
+ private fun EconomyModeSwitch(active: Boolean, onToggle: () -> Unit) {
+-    val scope = rememberCoroutineScope()
+-    var visualChecked by remember { mutableStateOf(active) }
+-    LaunchedEffect(active) { visualChecked = active }
+     Box(
+         modifier = Modifier.width(52.dp).height(48.dp),
+         contentAlignment = Alignment.Center,
+     ) {
+         Switch(
+-            checked = visualChecked,
+-            onCheckedChange = { checked ->
+-                if (checked != visualChecked) {
+-                    visualChecked = checked
+-                    scope.launch {
+-                        delay(180L)
+-                        if (active != checked) onToggle()
+-                    }
+-                }
+-            },
++            checked = active,
++            onCheckedChange = { onToggle() },
+         )
+     }
+ }
+@@ -684,12 +680,8 @@
+                 shape = RoundedCornerShape(16.dp),
+                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = .55f),
+             ) {
+-                Row(Modifier.padding(horizontal = 14.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+-                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primary.copy(alpha = .12f)) {
+-                        Box(Modifier.size(46.dp), contentAlignment = Alignment.Center) {
+-                            Icon(Icons.Rounded.BatterySaver, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(30.dp))
+-                        }
+-                    }
++                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
++                    Icon(Icons.Rounded.BatterySaver, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(32.dp))
+                     Spacer(Modifier.width(12.dp))
+                     Text("Mode économie activé", fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
+                 }
+@@ -895,55 +887,40 @@
+         textSize = textSizePx
+         typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+     }
++    val totalMs = visiblePeriods.sumOf { (start, end) -> end - start }
+ 
+     Panel(Modifier.fillMaxWidth(), PaddingValues(horizontal = 16.dp, vertical = 16.dp)) {
+         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+             Text("Aujourd’hui", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+             Spacer(Modifier.weight(1f))
+             Text(
+-                if (visiblePeriods.isEmpty()) "Aucune activité" else "${visiblePeriods.size} session${if (visiblePeriods.size > 1) "s" else ""}",
+-                style = MaterialTheme.typography.labelMedium,
+-                color = MaterialTheme.colorScheme.onSurfaceVariant,
++                DisplayTime.duration(totalMs),
++                style = MaterialTheme.typography.labelLarge,
++                color = MaterialTheme.colorScheme.primary,
++                fontWeight = FontWeight.ExtraBold,
+             )
+         }
+         Spacer(Modifier.height(12.dp))
+         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+             Canvas(Modifier.size(252.dp)) {
+                 val center = androidx.compose.ui.geometry.Offset(size.width / 2f, size.height / 2f)
+-                val radius = size.minDimension * 0.37f
++                val radius = size.minDimension * .37f
+                 val arcRadius = radius - 3.dp.toPx()
+                 val arcTopLeft = androidx.compose.ui.geometry.Offset(center.x - arcRadius, center.y - arcRadius)
+                 val arcSize = androidx.compose.ui.geometry.Size(arcRadius * 2f, arcRadius * 2f)
+ 
+-                drawCircle(
+-                    color = surfaceVariant.copy(alpha = .55f),
+-                    radius = radius + 18.dp.toPx(),
+-                    center = center,
+-                )
+-                drawCircle(
+-                    color = outline.copy(alpha = .22f),
+-                    radius = radius,
+-                    center = center,
+-                    style = Stroke(width = 2.dp.toPx()),
+-                )
++                drawCircle(surfaceVariant.copy(alpha = .45f), radius = radius + 18.dp.toPx(), center = center)
++                drawCircle(outline.copy(alpha = .24f), radius = radius, center = center, style = Stroke(width = 2.dp.toPx()))
+ 
+                 for (hour in 0 until 24) {
+-                    val angle = Math.toRadians((hour * 15.0) - 90.0)
++                    val angle = Math.toRadians(hour * 15.0 - 90.0)
+                     val major = hour % 3 == 0
+                     val outer = radius + 10.dp.toPx()
+-                    val inner = radius + if (major) 1.dp.toPx() else 5.dp.toPx()
+-                    val start = androidx.compose.ui.geometry.Offset(
+-                        center.x + cos(angle).toFloat() * inner,
+-                        center.y + sin(angle).toFloat() * inner,
+-                    )
+-                    val end = androidx.compose.ui.geometry.Offset(
+-                        center.x + cos(angle).toFloat() * outer,
+-                        center.y + sin(angle).toFloat() * outer,
+-                    )
++                    val inner = radius + if (major) 0.dp.toPx() else 5.dp.toPx()
+                     drawLine(
+                         color = if (major) onSurface.copy(alpha = .58f) else outline.copy(alpha = .35f),
+-                        start = start,
+-                        end = end,
++                        start = androidx.compose.ui.geometry.Offset(center.x + cos(angle).toFloat() * inner, center.y + sin(angle).toFloat() * inner),
++                        end = androidx.compose.ui.geometry.Offset(center.x + cos(angle).toFloat() * outer, center.y + sin(angle).toFloat() * outer),
+                         strokeWidth = if (major) 2.dp.toPx() else 1.dp.toPx(),
+                         cap = StrokeCap.Round,
+                     )
+@@ -953,11 +930,10 @@
+                     val span = (dayEnd - dayStart).coerceAtLeast(1L).toFloat()
+                     val startFraction = ((start - dayStart).toFloat() / span).coerceIn(0f, 1f)
+                     val endFraction = ((end - dayStart).toFloat() / span).coerceIn(0f, 1f)
+-                    val sweep = ((endFraction - startFraction) * 360f).coerceAtLeast(1.2f)
+                     drawArc(
+                         color = primary,
+                         startAngle = -90f + startFraction * 360f,
+-                        sweepAngle = sweep,+                        sweepAngle = ((endFraction - startFraction) * 360f).coerceAtLeast(1.2f),
+                         useCenter = false,
+                         topLeft = arcTopLeft,
+                         size = arcSize,
+@@ -966,26 +942,26 @@
+                 }
+ 
+                 listOf(0, 3, 6, 9, 12, 15, 18, 21).forEach { hour ->
+-                    val angle = Math.toRadians((hour * 15.0) - 90.0)
++                    val angle = Math.toRadians(hour * 15.0 - 90.0)
+                     val labelRadius = radius - 23.dp.toPx()
+                     val x = center.x + cos(angle).toFloat() * labelRadius
+                     val y = center.y + sin(angle).toFloat() * labelRadius + textSizePx * .35f
+                     drawContext.canvas.nativeCanvas.drawText(hour.toString().padStart(2, '0'), x, y, labelPaint)
+                 }
+ 
+-                drawCircle(color = primary, radius = 4.5.dp.toPx(), center = center)
+                 val currentFraction = ((now.coerceIn(dayStart, dayEnd) - dayStart).toFloat() / (dayEnd - dayStart).coerceAtLeast(1L).toFloat())
+                 val currentAngle = Math.toRadians((currentFraction * 360f - 90f).toDouble())
+                 drawLine(
+-                    color = onSurface.copy(alpha = .75f),
++                    color = onSurface.copy(alpha = .72f),
+                     start = center,
+                     end = androidx.compose.ui.geometry.Offset(
+-                        center.x + cos(currentAngle).toFloat() * (radius - 36.dp.toPx()),
+-                        center.y + sin(currentAngle).toFloat() * (radius - 36.dp.toPx()),
++                        center.x + cos(currentAngle).toFloat() * (radius - 35.dp.toPx()),
++                        center.y + sin(currentAngle).toFloat() * (radius - 35.dp.toPx()),
+                     ),
+                     strokeWidth = 2.dp.toPx(),
+                     cap = StrokeCap.Round,
+                 )
++                drawCircle(primary, radius = 4.5.dp.toPx(), center = center)
+             }
+         }
+     }
+@@ -1018,9 +994,9 @@
+     Surface(
+         modifier = Modifier
+             .fillMaxWidth()
+-            .clickable(enabled = selectionMode && period.endAt != null) { onToggleSelection() },
++            .then(if (selectionMode && period.endAt != null) Modifier.clickable { onToggleSelection() } else Modifier),
+         shape = RoundedCornerShape(20.dp),
+-        color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = .18f) else MaterialTheme.colorScheme.surface,
++        color = MaterialTheme.colorScheme.surface,
+         border = androidx.compose.foundation.BorderStroke(if (selected) 2.dp else 1.dp, if (selected) MaterialTheme.colorScheme.primary else accent.copy(alpha = .3f)),
+     ) {
+         Row(Modifier.padding(16.dp)) {
+@@ -1036,7 +1012,9 @@
+                         Text("${DisplayTime.clock(period.startAt)} → ${DisplayTime.clock(period.endAt)}", fontWeight = FontWeight.ExtraBold)
+                         Text(DisplayTime.duration(period.durationMs), color = accent, fontWeight = FontWeight.Bold)
+                     }
+-                    Text(if (period.endAt == null) "Session en cours" else "Période en ligne observée", color = MaterialTheme.colorScheme.onSurfaceVariant)
++                    if (period.endAt == null) {
++                        Text("Session en cours", color = MaterialTheme.colorScheme.onSurfaceVariant)
++                    }
+                 } else {
+                     Text("Événement à ${DisplayTime.clock(period.endAt)}", fontWeight = FontWeight.ExtraBold)
+                     Text(period.anomaly ?: "Confirmation hors ligne", color = accent)
+--- a/app/src/main/java/com/domniscian/app/ui/screens/MessagesScreen.kt
++++ b/app/src/main/java/com/domniscian/app/ui/screens/MessagesScreen.kt
+@@ -29,6 +29,7 @@
+ import com.domniscian.app.instagram.InstagramSession
+ import com.domniscian.app.ui.components.Avatar
+ import com.domniscian.app.ui.components.AccentButton
++import com.domniscian.app.ui.components.AccentIconButton
+ import com.domniscian.app.ui.components.DisplayTime
+ import com.domniscian.app.ui.components.Panel
+ import com.domniscian.app.ui.components.PillTabs
+@@ -82,8 +83,8 @@
+         verticalArrangement = Arrangement.spacedBy(14.dp),
+     ) {
+         item {
+-            ScreenHeader("Messages", "Aperçus et messages suivis") {
+-                FilledIconButton(onClick = { addSent = true }) { Icon(Icons.Rounded.AddComment, "Ajouter un message envoyé") }
++            ScreenHeader("Messages") {
++                AccentIconButton(onClick = { addSent = true }) { Icon(Icons.Rounded.Edit, "Créer un message") }
+             }
+         }
+         item {
+@@ -134,10 +135,9 @@
+     }
+ 
+     if (addSent) SentMessageDialog(
+-        targets = snapshot.targets,
++        target = snapshot.selectedTarget,
+         accounts = senderAccounts,
+         primaryUsername = snapshot.settings.primaryOwnAccountUsername ?: mainSession?.username,
+-        initialTarget = snapshot.selectedTarget?.id,
+         onDismiss = { addSent = false },
+         onConfirm = { targetId, account, content, at -> addSent = false; onAddSent(targetId, account, content, at) },
+     )
+@@ -463,14 +463,13 @@
+ @OptIn(ExperimentalMaterial3Api::class)
+ @Composable
+ private fun SentMessageDialog(
+-    targets: List<Target>,
++    target: Target?,
+     accounts: List<OwnAccount>,
+     primaryUsername: String?,
+-    initialTarget: String?,
+     onDismiss: () -> Unit,
+     onConfirm: (String, String, String, Long?) -> Unit,
+ ) {
+-    val targetId = initialTarget ?: targets.firstOrNull()?.id.orEmpty()
++    val targetId = target?.id.orEmpty()
+     var senderUsername by remember {
+         mutableStateOf(
+             accounts.firstOrNull { it.username.equals(primaryUsername, ignoreCase = true) }?.username
+@@ -483,7 +482,6 @@
+     var selectedHour by rememberSaveable { mutableIntStateOf(now.hour) }
+     var selectedMinute by rememberSaveable { mutableIntStateOf(now.minute) }
+     var exactTimeKnown by rememberSaveable { mutableStateOf(true) }
+-    val target = targets.firstOrNull { it.id == targetId }
+     val sender = accounts.firstOrNull { it.username.equals(senderUsername, ignoreCase = true) }
+     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+ 
+@@ -498,24 +496,33 @@
+         ) {
+             Text("Suivre un message envoyé", style = MaterialTheme.typography.headlineSmall)
+ 
+-            Surface(
+-                modifier = Modifier.fillMaxWidth(),
+-                shape = RoundedCornerShape(18.dp),
+-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .58f),
+-                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+-            ) {
+-                if (target != null) {
+-                    Row(Modifier.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
+-                        Avatar(url = target.profilePictureUrl, size = 48.dp)
+-                        Spacer(Modifier.width(12.dp))
++            if (target == null) {
++                Surface(
++                    modifier = Modifier.fillMaxWidth(),
++                    shape = RoundedCornerShape(16.dp),
++                    color = MaterialTheme.colorScheme.errorContainer,
++                ) {
++                    Text(
++                        "Aucune cible sélectionnée",
++                        modifier = Modifier.padding(14.dp),
++                        color = MaterialTheme.colorScheme.onErrorContainer,
++                        fontWeight = FontWeight.Bold,
++                    )
++                }
++            } else {
++                Surface(
++                    modifier = Modifier.fillMaxWidth(),
++                    shape = RoundedCornerShape(16.dp),
++                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f),
++                ) {
++                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
++                        Avatar(url = target.profilePictureUrl, size = 46.dp)
++                        Spacer(Modifier.width(11.dp))
+                         Column(Modifier.weight(1f)) {
+-                            Text(target.displayName, fontWeight = FontWeight.Bold, maxLines = 1)
+-                            Text("@${target.username}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
++                            Text(target.displayName.trim(), fontWeight = FontWeight.ExtraBold, maxLines = 1)
++                            Text("@${target.username.trim().removePrefix("@")}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                         }
+-                        Icon(Icons.Rounded.Person, null, tint = MaterialTheme.colorScheme.primary)
+                     }
+-                } else {
+-                    Text("Aucune cible sélectionnée", Modifier.padding(14.dp), fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.error)
+                 }
+             }
+ 
+@@ -616,7 +623,7 @@
+     onHourChanged: (Int) -> Unit,
+     onMinuteChanged: (Int) -> Unit,
+ ) {
+-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)) {
++    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+         Row(
+             Modifier.fillMaxWidth(),
+             horizontalArrangement = Arrangement.Center,
+--- a/app/src/main/java/com/domniscian/app/ui/screens/SettingsScreen.kt
++++ b/app/src/main/java/com/domniscian/app/ui/screens/SettingsScreen.kt
+@@ -12,6 +12,7 @@
+ import androidx.compose.foundation.rememberScrollState
+ import androidx.compose.foundation.gestures.detectDragGestures
+ import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.text.KeyboardOptions
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.automirrored.rounded.ArrowForward
+@@ -24,8 +25,8 @@
+ import androidx.compose.ui.autofill.ContentType
+ import androidx.compose.ui.autofill.contentType
+ import androidx.compose.ui.Modifier
+-import androidx.compose.ui.draw.alpha
+ import androidx.compose.ui.draw.clip
++import androidx.compose.ui.draw.alpha
+ import androidx.compose.ui.geometry.Offset
+ import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.graphics.Brush
+@@ -35,7 +36,6 @@
+ import androidx.compose.ui.text.font.FontWeight
+ import androidx.compose.ui.text.input.PasswordVisualTransformation
+ import androidx.compose.ui.text.input.KeyboardType
+-import androidx.compose.foundation.text.KeyboardOptions
+ import androidx.compose.ui.unit.dp
+ import com.domniscian.app.diagnostics.ErrorCatalog
+ import com.domniscian.app.instagram.InstagramSession
+@@ -89,12 +89,14 @@
+         verticalArrangement = Arrangement.spacedBy(16.dp),
+     ) {
+         item {
+-            ScreenHeader("Réglages", "Compte, observation et apparence")
++            ScreenHeader("Réglages")
+         }
+         item {
+             Panel(Modifier.fillMaxWidth()) {
+-                SectionHeader("Compte secondaire")
++                SectionHeader("Comptes Instagram")
+                 Spacer(Modifier.height(14.dp))
++                Text("Compte secondaire", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
++                Spacer(Modifier.height(10.dp))
+                 if (secondarySession == null) {
+                     Row(verticalAlignment = Alignment.CenterVertically) {
+                         Icon(Icons.Rounded.NoAccounts, null, tint = MaterialTheme.colorScheme.error)
+@@ -102,46 +104,47 @@
+                         Text("Aucun compte connecté", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                     }
+                     Spacer(Modifier.height(12.dp))
+-                    Button(onClick = onConnectSecondary, modifier = Modifier.fillMaxWidth()) { Icon(Icons.AutoMirrored.Rounded.Login, null); Spacer(Modifier.width(8.dp)); Text("Connecter le compte secondaire") }
++                    Button(onClick = onConnectSecondary, modifier = Modifier.fillMaxWidth().height(50.dp)) {
++                        Icon(Icons.AutoMirrored.Rounded.Login, null)
++                        Spacer(Modifier.width(8.dp))
++                        Text("Connecter le compte secondaire")
++                    }
+                 } else {
+                     Row(verticalAlignment = Alignment.CenterVertically) {
+                         Icon(Icons.Rounded.VerifiedUser, null, tint = Green)
+                         Spacer(Modifier.width(10.dp))
+-                        Column(Modifier.weight(1f)) {
+-                            Text("Connecté : @${secondarySession.username}", color = Green, fontWeight = FontWeight.ExtraBold)
+-                            Text("Session enregistrée ${DisplayTime.full(secondarySession.savedAt)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+-                            Text("Appareil Instagram : Pixel 8 Pro (compatibilité 2.3)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+-                        }
++                        Text("@${secondarySession.username}", color = Green, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+                     }
+-                    Spacer(Modifier.height(12.dp))
++                    Spacer(Modifier.height(10.dp))
+                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+-                        OutlinedButton(onClick = onConnectSecondary, modifier = Modifier.weight(1f)) { Text("Reconnecter") }
+-                        OutlinedButton(onClick = { disconnectSecondaryDialog = true }, modifier = Modifier.weight(1f), colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Déconnecter") }
++                        OutlinedButton(onClick = onConnectSecondary, modifier = Modifier.weight(1f).height(48.dp)) { Text("Reconnecter") }
++                        OutlinedButton(
++                            onClick = { disconnectSecondaryDialog = true },
++                            modifier = Modifier.weight(1f).height(48.dp),
++                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
++                        ) { Text("Déconnecter") }
+                     }
+                 }
+-            }
+-        }
+-        item {
+-            Panel(Modifier.fillMaxWidth()) {
+-                SectionHeader("Compte principal", "Messages envoyés et lectures")
+-                Spacer(Modifier.height(12.dp))
++
++                HorizontalDivider(Modifier.padding(vertical = 18.dp), color = MaterialTheme.colorScheme.outlineVariant)
++
++                Text("Compte principal", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
++                Spacer(Modifier.height(10.dp))
+                 if (mainSession == null) {
+-                    OutlinedButton(onClick = onConnectMain, modifier = Modifier.fillMaxWidth()) {
+-                        Icon(Icons.Rounded.LockOpen, null); Spacer(Modifier.width(8.dp)); Text("Connecter le compte principal")
++                    OutlinedButton(onClick = onConnectMain, modifier = Modifier.fillMaxWidth().height(50.dp)) {
++                        Icon(Icons.Rounded.LockOpen, null)
++                        Spacer(Modifier.width(8.dp))
++                        Text("Connecter le compte principal")
+                     }
+                 } else {
+                     Row(verticalAlignment = Alignment.CenterVertically) {
+                         Icon(Icons.Rounded.EnhancedEncryption, null, tint = Green)
+                         Spacer(Modifier.width(10.dp))
+-                        Column(Modifier.weight(1f)) {
+-                            Text("Connecté : @${mainSession.username}", color = Green, fontWeight = FontWeight.ExtraBold)
+-                            Text("Session chiffrée et séparée", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+-                            Text("Appareil Instagram : Pixel 8 Pro (compatibilité 2.3)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+-                        }
++                        Text("@${mainSession.username}", color = Green, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+                     }
+                     SettingSwitch(
+                         "Synchronisation Direct en lecture seule",
+-                        "Toutes les ${snapshot.settings.directSyncIntervalMs / 1_000L}s",
++                        "",
+                         snapshot.settings.directSyncEnabled,
+                     ) { enabled -> onSettings { it.copy(directSyncEnabled = enabled) } }
+                     Text("Intervalle Direct", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+@@ -156,8 +159,12 @@
+                     }
+                     Spacer(Modifier.height(10.dp))
+                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+-                        OutlinedButton(onClick = onConnectMain, modifier = Modifier.weight(1f)) { Text("Reconnecter") }
+-                        OutlinedButton(onClick = { disconnectMainDialog = true }, modifier = Modifier.weight(1f), colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Déconnecter") }
++                        OutlinedButton(onClick = onConnectMain, modifier = Modifier.weight(1f).height(48.dp)) { Text("Reconnecter") }
++                        OutlinedButton(
++                            onClick = { disconnectMainDialog = true },
++                            modifier = Modifier.weight(1f).height(48.dp),
++                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
++                        ) { Text("Déconnecter") }
+                     }
+                 }
+             }
+@@ -166,7 +173,7 @@
+             Panel(Modifier.fillMaxWidth()) {
+                 SectionHeader(
+                     "Mes comptes",
+-                    "Tes comptes seront affichés quand tu sélectionneras un message manuellement.",
++                    "Tes comptes apparaîtront quand tu ajouteras manuellement un message.",
+                     action = {
+                         FilledTonalIconButton(onClick = { editingOwnAccount = null; ownAccountDialog = true }) {
+                             Icon(Icons.Rounded.PersonAdd, "Ajouter un compte")
+@@ -209,7 +216,7 @@
+         }
+         item {
+             Panel(Modifier.fillMaxWidth()) {
+-                SectionHeader("Mode d’observation")
++                SectionHeader("Moteur d’observation")
+                 Spacer(Modifier.height(12.dp))
+                 PillTabs(
+                     values = ObservationMode.entries,
+@@ -218,60 +225,44 @@
+                     onSelected = { mode -> onSettings { it.copy(observationMode = mode) } },
+                     modifier = Modifier.fillMaxWidth(),
+                 )
+-                Spacer(Modifier.height(8.dp))
+-                Text(
+-                    if (snapshot.settings.observationMode == ObservationMode.DOMNISCIAN)
+-                        "Domniscian interroge Instagram périodiquement selon la fréquence choisie ci-dessous."
+-                    else
+-                        "Hinozall Awoken utilise le canal temps réel MQTToT et ne fait pas de polling HTTP périodique tant que la connexion est saine.",
+-                    style = MaterialTheme.typography.bodySmall,
+-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+-                )
+-            }
+-        }
+-        item {
+-            val frequencyEnabled = snapshot.settings.observationMode == ObservationMode.DOMNISCIAN
+-            Panel(Modifier.fillMaxWidth()) {
+-                Column(Modifier.alpha(if (frequencyEnabled) 1f else .42f)) {
+-                SectionHeader("Observation basse sollicitation", "Cadence rapide : ${snapshot.settings.pollingIntervalMs / 1_000L} seconde(s)")
+-                Spacer(Modifier.height(12.dp))
+-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+-                    listOf(1, 2, 3, 4, 5, 10, 15, 30, 60).forEach { seconds ->
+-                        FilterChip(
+-                            selected = snapshot.settings.pollingIntervalMs == seconds * 1_000L,
+-                            enabled = frequencyEnabled,
++                Spacer(Modifier.height(18.dp))
++                val pollingEnabled = snapshot.settings.observationMode == ObservationMode.DOMNISCIAN
++                Column(Modifier.alpha(if (pollingEnabled) 1f else .38f)) {
++                    Text("Fréquence de vérification", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
++                    Spacer(Modifier.height(10.dp))
++                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
++                        listOf(1, 2, 3, 4, 5, 10, 15, 30, 60).forEach { seconds ->
++                            FilterChip(
++                                selected = snapshot.settings.pollingIntervalMs == seconds * 1_000L,
++                                enabled = pollingEnabled,
++                                onClick = {
++                                    if (seconds < 5) fastIntervalPending = seconds
++                                    else onSettings { it.copy(pollingIntervalMs = seconds * 1_000L) }
++                                },
++                                label = { Text("${seconds}s") },
++                            )
++                        }
++                    }
++                    Spacer(Modifier.height(12.dp))
++                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
++                        OutlinedTextField(
++                            value = exactSeconds,
++                            onValueChange = { exactSeconds = it.filter(Char::isDigit).take(3) },
++                            enabled = pollingEnabled,
++                            label = { Text("Secondes exactes (1–300)") },
++                            singleLine = true,
++                            modifier = Modifier.weight(1f),
++                        )
++                        Button(
++                            enabled = pollingEnabled,
+                             onClick = {
++                                val seconds = exactSeconds.toIntOrNull()?.coerceIn(1, 300) ?: return@Button
+                                 if (seconds < 5) fastIntervalPending = seconds
+                                 else onSettings { it.copy(pollingIntervalMs = seconds * 1_000L) }
+                             },
+-                            label = { Text("${seconds}s") },
+-                        )
++                        ) { Text("Appliquer") }
+                     }
+                 }
+-                Spacer(Modifier.height(12.dp))
+-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+-                    OutlinedTextField(
+-                        value = exactSeconds,
+-                        onValueChange = { exactSeconds = it.filter(Char::isDigit).take(3) },
+-                        label = { Text("Secondes exactes (1–300)") },
+-                        singleLine = true,
+-                        enabled = frequencyEnabled,
+-                        modifier = Modifier.weight(1f),
+-                    )
+-                    Button(enabled = frequencyEnabled, onClick = {
+-                        val seconds = exactSeconds.toIntOrNull()?.coerceIn(1, 300) ?: return@Button
+-                        if (seconds < 5) fastIntervalPending = seconds
+-                        else onSettings { it.copy(pollingIntervalMs = seconds * 1_000L) }
+-                    }) { Text("Appliquer") }
+-                }
+-                Spacer(Modifier.height(8.dp))
+-                Text(
+-                    if (frequencyEnabled) "Cette cadence est utilisée par le moteur Domniscian."
+-                    else "Fréquence inactive en mode Hinozall Awoken.",
+-                    style = MaterialTheme.typography.bodySmall,
+-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+-                )
+-                }
+             }
+         }
+         item {
+@@ -314,24 +305,22 @@
+         }
+         item {
+             Panel(Modifier.fillMaxWidth()) {
+-                SectionHeader("Sauvegarde locale", "Historique, cibles, messages et apparence")
+-                Spacer(Modifier.height(10.dp))
+-                Text(
+-                    "Le fichier est chiffré par un mot de passe choisi ici. Les sessions Instagram ne sont jamais exportées.",
+-                    style = MaterialTheme.typography.bodySmall,
+-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+-                )
+-                Spacer(Modifier.height(14.dp))
++                SectionHeader("Sauvegarde locale")
++                Spacer(Modifier.height(12.dp))
+                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+-                    AccentButton(onClick = { backupPassphrase = ""; backupAction = BackupAction.EXPORT }, modifier = Modifier.weight(1f)) {
++                    Button(
++                        onClick = { backupPassphrase = ""; backupAction = BackupAction.EXPORT },
++                        modifier = Modifier.weight(1f).height(50.dp),
++                    ) {
+                         Icon(Icons.Rounded.FileUpload, null); Spacer(Modifier.width(6.dp)); Text("Exporter")
+                     }
+-                    OutlinedButton(onClick = { backupPassphrase = ""; backupAction = BackupAction.IMPORT }, modifier = Modifier.weight(1f)) {
++                    OutlinedButton(
++                        onClick = { backupPassphrase = ""; backupAction = BackupAction.IMPORT },
++                        modifier = Modifier.weight(1f).height(50.dp),
++                    ) {
+                         Icon(Icons.Rounded.FileDownload, null); Spacer(Modifier.width(6.dp)); Text("Restaurer")
+                     }
+                 }
+-                Spacer(Modifier.height(8.dp))
+-                Text("Une mise à jour conserve déjà les données. Pour une désinstallation, exporte d’abord ce fichier.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+             }
+         }
+         item {
+@@ -366,7 +355,7 @@
+                 }
+             }
+         }
+-        item { SectionHeader("Catalogue des erreurs", "Codes Domniscian et réponses HTTP de référence") }
++        item { SectionHeader("Catalogue des erreurs") }
+         itemsIndexed(ErrorCatalog.entries, key = { index, item -> "error_${item.code}_$index" }) { _, definition ->
+             Surface(
+                 modifier = Modifier.fillMaxWidth().clickable { errorDefinition = definition },
+@@ -384,7 +373,7 @@
+         }
+         item {
+             Panel(Modifier.fillMaxWidth()) {
+-                SectionHeader("Hinozall Awoken 1.1.0", "Application séparée • Version 4")
++                SectionHeader("Hinozall Awoken 3.5.0")
+                 Spacer(Modifier.height(10.dp))
+                 Text("Nouveautés", fontWeight = FontWeight.Bold)
+                 listOf(
+@@ -451,10 +440,6 @@
+         title = { Text(if (action == BackupAction.EXPORT) "Chiffrer la sauvegarde" else "Restaurer la sauvegarde") },
+         text = {
+             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+-                Text(
+-                    if (action == BackupAction.EXPORT) "Choisis un mot de passe d’au moins 6 caractères. Il sera nécessaire pour restaurer le fichier."
+-                    else "La restauration remplacera les données locales actuelles. Entre le mot de passe du fichier.",
+-                )
+                 OutlinedTextField(
+                     value = backupPassphrase,
+                     onValueChange = { backupPassphrase = it },
+@@ -462,9 +447,7 @@
+                     visualTransformation = PasswordVisualTransformation(),
+                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                     singleLine = true,
+-                    modifier = Modifier
+-                        .fillMaxWidth()
+-                        .contentType(if (action == BackupAction.EXPORT) ContentType.NewPassword else ContentType.Password),
++                    modifier = Modifier.fillMaxWidth().contentType(if (action == BackupAction.EXPORT) ContentType.NewPassword else ContentType.Password),
+                 )
+             }
+         },
+@@ -497,8 +480,8 @@
+ @Composable
+ private fun SettingSwitch(title: String, subtitle: String, value: Boolean, onChange: (Boolean) -> Unit) {
+     Row(Modifier.fillMaxWidth().padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+-        Column(Modifier.weight(1f)) { Text(title, fontWeight = FontWeight.SemiBold); Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+-        Switch(value, onChange)
++        Text(title, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
++        Switch(checked = value, onCheckedChange = onChange)
+     }
+ }
+ 
+@@ -512,10 +495,7 @@
+             modifier = Modifier.size(25.dp),
+         )
+         Spacer(Modifier.width(12.dp))
+-        Column(Modifier.weight(1f)) {
+-            Text(title, fontWeight = FontWeight.SemiBold)
+-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+-        }
++        Text(title, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+     }
+ }
+ 
