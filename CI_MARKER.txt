@@ -1,0 +1,1 @@
+This branch is build transport only. Application source is reconstructed from the current-conversation user payload and never read from repository source files.
