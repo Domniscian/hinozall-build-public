@@ -1,0 +1,60 @@
+name: Build exact uploaded Domniscian source
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct exact uploaded source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat input/source.b64.part* | tr -d '\r\n' | base64 --decode > /tmp/domniscian-source.zip
+          mkdir -p /tmp/domniscian-source
+          unzip -q /tmp/domniscian-source.zip -d /tmp/domniscian-source
+          test -f /tmp/domniscian-source/gradlew
+          test ! -e /tmp/domniscian-source/keystore.properties
+          if find /tmp/domniscian-source -name '*.jks' -o -name '*.keystore' | grep -q .; then
+            echo "Signing material must never be present in CI input." >&2
+            exit 20
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Build and test unsigned release
+        shell: bash
+        working-directory: /tmp/domniscian-source
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon clean test assembleRelease
+
+      - name: Collect unsigned APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          cp /tmp/domniscian-source/app/build/outputs/apk/release/*.apk /tmp/out/
+          sha256sum /tmp/out/*.apk | tee /tmp/out/SHA256SUMS.txt
+
+      - name: Upload unsigned build
+        uses: actions/upload-artifact@v4
+        with:
+          name: hinozall-awoken-3-6-unsigned
+          path: /tmp/out/
+          if-no-files-found: error
+          retention-days: 1
