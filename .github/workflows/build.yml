@@ -22,12 +22,21 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Extract canonical source
+      - name: Decode canonical source
         run: |
-          rm -rf work
+          rm -rf work source.zip
+          base64 --decode source.zip.b64 > source.zip
           mkdir work
-          unzip -q Hinozall-Awoken-3.5.1-PUBLIC-BUILD-SOURCE.zip -d work
+          unzip -q source.zip -d work
           chmod +x work/gradlew
+
+      - name: Apply final 3.5.1 corrections
+        run: python3 prepare_build.py
+
+      - name: Verify no private signing material exists
+        run: |
+          ! find . -type f \( -name '*.jks' -o -name '*.keystore' -o -name 'keystore.properties' \) | grep .
+          ! grep -RIlE 'BEGIN (RSA |EC |)PRIVATE KEY|storePassword[[:space:]]*=|keyPassword[[:space:]]*=' work . --exclude='prepare_build.py' | grep .
 
       - name: Build unsigned release APK
         working-directory: work
@@ -39,6 +48,7 @@ jobs:
           APK="$(find work/app/build/outputs/apk/release -type f -name '*.apk' | head -n 1)"
           test -n "$APK"
           cp "$APK" Hinozall-Awoken-3.5.1-UNSIGNED.apk
+          sha256sum Hinozall-Awoken-3.5.1-UNSIGNED.apk
 
       - name: Upload unsigned APK
         uses: actions/upload-artifact@v4
