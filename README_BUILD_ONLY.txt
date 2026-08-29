@@ -1,0 +1,1 @@
+Fresh build branch created only from the user-provided source archive. Do not use repository history as source.
