@@ -1,0 +1,6 @@
+Hinozall Awoken 3.6 isolated build
+Source: ONLY current user-provided Le mega.zip canonical source
+Input SHA256 Le mega.apk: a73a89081e7cc47c8a164100a0eedfa5f9dcaa4ae9c7a634cf58b88aa206102f
+Input SHA256 Le mega.zip: d90d4ba9c5d48b866dc146256d4bf90faaeefe9ea852f50e9a26eee36c32e420
+Input SHA256 backup: b8df8ef69c383761a1bc20bb40a431ac35fac2614659b9d0d14240f419c23791
+Existing repository files are not used. Signing material is not uploaded.
